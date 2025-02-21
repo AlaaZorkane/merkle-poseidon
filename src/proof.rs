@@ -1,7 +1,9 @@
 use ark_bn254::Fr;
+use ark_ff::AdditiveGroup;
 
 use crate::{Hasher, NodeHash, PathHash, PoseidonMerkleError, SparseMerkleTree};
 
+#[derive(Debug, Clone)]
 pub struct MerkleProof {
     /// The siblings of the proof
     pub siblings: Vec<NodeHash>,
@@ -30,7 +32,7 @@ impl MerkleProof {
 
     /// Verify the proof bottom up
     pub fn verify_proof(&self, hasher: &mut Hasher) -> Result<bool, PoseidonMerkleError> {
-        let mut current_hash = hasher.hash(&[self.leaf_value])?;
+        let mut current_hash = hasher.hash(&[self.leaf_value, Fr::ZERO])?;
 
         for (i, sibling) in self.siblings.iter().enumerate() {
             let go_right = SparseMerkleTree::get_path_bit(&self.path, i);

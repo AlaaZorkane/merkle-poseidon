@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use ark_bn254::Fr;
+use ark_ff::AdditiveGroup;
 use light_poseidon::{PoseidonError, PoseidonHasher};
 
 pub type NodeHash = Fr;
@@ -11,15 +12,16 @@ pub enum NodeType {
     Inner,
 }
 
+// TODO: add path hash, depth level and sibling hash
 #[derive(Debug, Clone)]
-pub struct Node {
+pub struct Node<H: PoseidonHasher<Fr>> {
     pub node_type: NodeType,
-    pub left: Option<Rc<RefCell<Node>>>,
-    pub right: Option<Rc<RefCell<Node>>>,
+    pub left: Option<Rc<RefCell<Node<H>>>>,
+    pub right: Option<Rc<RefCell<Node<H>>>>,
     pub hash: Option<NodeHash>,
 }
 
-impl Node {
+impl<H: PoseidonHasher<Fr>> Node<H> {
     pub fn new_leaf(value: Fr) -> Self {
         Node {
             node_type: NodeType::Leaf(value),
@@ -40,7 +42,7 @@ impl Node {
 
     pub fn compute_hash(
         &self,
-        poseidon: &mut Box<dyn PoseidonHasher<Fr>>,
+        hasher: &mut H,
         empty_hash: &NodeHash,
     ) -> Result<NodeHash, PoseidonError> {
         if let Some(hash) = self.hash {
@@ -48,23 +50,23 @@ impl Node {
         }
 
         match &self.node_type {
-            NodeType::Leaf(value) => Ok(*value),
+            NodeType::Leaf(value) => hasher.hash(&[*value, Fr::ZERO]),
             NodeType::Inner => {
                 let left_hash = self
                     .left
                     .as_ref()
-                    .map(|node| node.borrow().compute_hash(poseidon, empty_hash))
+                    .map(|node| node.borrow().compute_hash(hasher, empty_hash))
                     .transpose()?
                     .unwrap_or(*empty_hash);
 
                 let right_hash = self
                     .right
                     .as_ref()
-                    .map(|node| node.borrow().compute_hash(poseidon, empty_hash))
+                    .map(|node| node.borrow().compute_hash(hasher, empty_hash))
                     .transpose()?
                     .unwrap_or(*empty_hash);
 
-                poseidon.hash(&[left_hash, right_hash])
+                hasher.hash(&[left_hash, right_hash])
             }
         }
     }
@@ -72,19 +74,19 @@ impl Node {
     /// Invalidate and recalculate the hash of the node
     pub fn recalculate_hash(
         &mut self,
-        poseidon: &mut Box<dyn PoseidonHasher<Fr>>,
+        hasher: &mut H,
         empty_hash: &NodeHash,
     ) -> Result<(), PoseidonError> {
-        self.hash = Some(self.compute_hash(poseidon, empty_hash)?);
+        self.hash = Some(self.compute_hash(hasher, empty_hash)?);
 
         Ok(())
     }
 }
 
-impl PartialEq for Node {
+impl<H: PoseidonHasher<Fr>> PartialEq for Node<H> {
     fn eq(&self, other: &Self) -> bool {
         self.hash == other.hash
     }
 }
 
-impl Eq for Node {}
+impl<H: PoseidonHasher<Fr>> Eq for Node<H> {}
