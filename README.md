@@ -1,14 +1,15 @@
 # Merkle Poseidon
-A sparse merkle tree implementation using Poseidon hash function and arkworks ff primitives.
+A wasm-compatible sparse merkle tree implementation using Poseidon hash function and arkworks ff primitives.
 
 ## Usage
 
 ```rust
 use merkle_poseidon::SparseMerkleTree;
 
-let tree = SparseMerkleTree::new(16).unwrap();
+// Create a tree with 3 levels
+let tree = SparseMerkleTree::new(3).unwrap();
 
-let path = Fr::from_bigint(BigInt::from_bits_le(&[false, false, false])).unwrap();
+let path = Fr::from_bigint(BigInt::from_bits_le(&[true, true, true])).unwrap();
 let value = Fr::from(100u64);
 
 tree.insert_at_path(&path, &value).unwrap();
@@ -18,6 +19,18 @@ let proof = tree.generate_proof(&path).unwrap();
 let verified = proof.verify_proof(&mut hasher).unwrap();
 
 assert!(verified);
+```
+
+## Tree visualization
+
+```
+                     [I]                    Level 0
+                    /   \
+                 [I]     [I]               Level 1
+                /  \    /   \
+              [I]  [I] [I]   [I]          Level 2
+              /    /    \     \
+            [L]  [L]    [L]   [L]         Leaf Level
 ```
 
 ## Structure
