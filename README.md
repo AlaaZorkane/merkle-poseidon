@@ -6,8 +6,8 @@ A wasm-compatible sparse merkle tree implementation using Poseidon hash function
 ```rust
 use merkle_poseidon::SparseMerkleTree;
 
-// Create a tree with 3 levels
-let tree = SparseMerkleTree::new(3).unwrap();
+// Create a tree with 2 levels
+let tree = SparseMerkleTree::new(2).unwrap();
 
 let path = Fr::from_bigint(BigInt::from_bits_le(&[true, true, true])).unwrap();
 let value = Fr::from(100u64);
@@ -28,7 +28,7 @@ assert!(verified);
                     /   \
                  [I]     [I]               Level 1
                 /  \    /   \
-              [I]  [I] [I]   [I]          Level 2
+              [I]  [I] [I]   [I]          Level 2 (inner leaf nodes)
               /    /    \     \
             [L]  [L]    [L]   [L]         Leaf Level
 ```
