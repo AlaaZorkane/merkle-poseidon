@@ -2,7 +2,7 @@ use ark_bn254::Fr;
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use light_poseidon::{Poseidon, PoseidonHasher};
 
-use crate::{get_empty_inner_hash, PoseidonMerkleError, SparseMerkleTree, Visualizer};
+use crate::{get_empty_inner_hash, PoseidonMerkleError, SparseMerkleTree};
 
 const DEPTH: usize = 2;
 const TEST_PATH: [bool; DEPTH] = [true, false];
@@ -119,8 +119,6 @@ fn test_proof_generation_and_verification() {
 
     // Insert a value
     tree.insert_at_path(&merkle_path, &value).unwrap();
-
-    tree.visualize();
 
     // Generate proof
     let proof = tree.generate_proof(&merkle_path).unwrap();
