@@ -1,5 +1,5 @@
 use ark_bn254::Fr;
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField, Zero};
+use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use light_poseidon::{Poseidon, PoseidonHasher};
 
 use crate::{get_empty_inner_hash, PoseidonMerkleError, SparseMerkleTree, Visualizer};
@@ -10,6 +10,13 @@ const TEST_PATH: [bool; DEPTH] = [true, false];
 /// Setup a new tree with a depth of 2 (for testing purposes)
 fn setup_tree() -> SparseMerkleTree<Poseidon<Fr>> {
     SparseMerkleTree::new(DEPTH).unwrap()
+}
+
+#[test]
+fn test_hasher() {
+    let mut hasher = Poseidon::<Fr>::new_circom(2).unwrap();
+    let computed_hash = hasher.hash(&[Fr::ZERO, Fr::from(200u64)]).unwrap();
+    println!("computed_hash: {:?}", computed_hash);
 }
 
 #[test]
@@ -70,7 +77,7 @@ fn test_delete() {
 
     // Verify value is zero
     let retrieved_value = tree.get_value(&merkle_path).unwrap();
-    assert_eq!(retrieved_value, Fr::zero());
+    assert_eq!(retrieved_value, Fr::ZERO);
 }
 
 #[test]

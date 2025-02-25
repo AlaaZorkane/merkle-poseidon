@@ -234,46 +234,78 @@ impl SparseMerkleTree<Poseidon<Fr>> {
     }
 
     /// Insert a value at a given path
+    ///
+    /// This function traverses down the tree following the path specified by the merkle_path,
+    /// creates nodes as needed, inserts the value at the leaf level, and then updates
+    /// hashes from bottom to top.
     pub fn insert_at_path(
         &mut self,
         merkle_path: &MerklePath,
         value: &Fr,
     ) -> Result<(), PoseidonMerkleError> {
-        let mut backtrack_to_root: Vec<Rc<RefCell<Node<Poseidon<Fr>>>>> = Vec::new();
+        // Store nodes that need hash recalculation in reverse order (bottom-up)
+        let mut nodes_to_update: Vec<Rc<RefCell<Node<Poseidon<Fr>>>>> =
+            Vec::with_capacity(self.depth);
 
-        // New closure to avoid borrowing issues
-        {
-            let mut current = self.root.clone();
-            for i in 0..self.depth {
-                let go_right = SparseMerkleTree::get_path_bit(merkle_path, i);
-                let next = {
-                    let mut current_ref = current.borrow_mut();
-                    if go_right {
-                        if current_ref.right.is_none() {
-                            current_ref.right = Some(Node::new_borrowed_empty_inner());
-                        }
-                        current_ref.right.as_ref().unwrap().clone()
-                    } else {
-                        if current_ref.left.is_none() {
-                            current_ref.left = Some(Node::new_borrowed_empty_inner());
-                        }
-                        current_ref.left.as_ref().unwrap().clone()
+        // Traverse down the tree, creating nodes as needed
+        let mut current_node = self.root.clone();
+
+        // For each level in the tree (except leaf level)
+        for level in 0..self.depth {
+            // Determine direction based on the current bit in the path
+            let go_right = Self::get_path_bit(merkle_path, level);
+
+            // Get or create the next node
+            let next_node = {
+                let mut current_ref = current_node.borrow_mut();
+
+                // Get or create the appropriate child node
+                if go_right {
+                    // Create right child if it doesn't exist
+                    if current_ref.right.is_none() {
+                        // Use inner nodes for all but the last level
+                        let new_node = if level == self.depth - 1 {
+                            Node::new_borrowed_leaf(*value)
+                        } else {
+                            Node::new_borrowed_empty_inner()
+                        };
+                        current_ref.right = Some(new_node);
+                    } else if level == self.depth - 1 {
+                        // If we're at leaf level and the node exists, update its value
+                        let leaf_node = current_ref.right.as_ref().unwrap().clone();
+                        leaf_node.borrow_mut().node_type = NodeType::Leaf(*value);
                     }
-                };
+                    current_ref.right.as_ref().unwrap().clone()
+                } else {
+                    // Create left child if it doesn't exist
+                    if current_ref.left.is_none() {
+                        // Use inner nodes for all but the last level
+                        let new_node = if level == self.depth - 1 {
+                            Node::new_borrowed_leaf(*value)
+                        } else {
+                            Node::new_borrowed_empty_inner()
+                        };
+                        current_ref.left = Some(new_node);
+                    } else if level == self.depth - 1 {
+                        // If we're at leaf level and the node exists, update its value
+                        let leaf_node = current_ref.left.as_ref().unwrap().clone();
+                        leaf_node.borrow_mut().node_type = NodeType::Leaf(*value);
+                    }
+                    current_ref.left.as_ref().unwrap().clone()
+                }
+            };
 
-                backtrack_to_root.push(current.clone());
-                current = next.clone();
-            }
+            // Add current node to the update list (we'll recalculate its hash later)
+            nodes_to_update.push(current_node.clone());
 
-            // At leaf level, we insert the value
-            let mut current_ref = current.borrow_mut();
-            *current_ref = Node::new_leaf(*value);
+            // Move to the next node
+            current_node = next_node;
         }
 
-        // Recalculate hashes bottom-up
-        let rev_backtrack_to_root = backtrack_to_root.iter().rev();
-        for node in rev_backtrack_to_root {
-            node.borrow_mut().recalculate_hash(&mut self.hasher)?;
+        // Update hashes bottom-up
+        for node in nodes_to_update.iter().rev() {
+            let mut node_ref = node.borrow_mut();
+            node_ref.recalculate_hash(&mut self.hasher)?;
         }
 
         Ok(())

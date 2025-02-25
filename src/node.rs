@@ -33,6 +33,14 @@ impl NodeType {
             NodeType::Inner(_) => None,
         }
     }
+
+    /// Get either the value or the hash of the node
+    pub fn data(&self) -> &Fr {
+        match self {
+            NodeType::Leaf(value) => value,
+            NodeType::Inner(hash) => hash,
+        }
+    }
 }
 
 // TODO: add path hash, depth level and sibling hash
@@ -92,28 +100,60 @@ impl<H: PoseidonHasher<Fr>> Node<H> {
         Rc::new(RefCell::new(Node::new_empty_inner()))
     }
 
+    /// Check if the node is the last inner node (either left or right is a leaf)
+    pub fn is_last_inner(&self) -> bool {
+        let left_is_leaf = self
+            .left
+            .as_ref()
+            .map(|node| matches!(node.borrow().node_type, NodeType::Leaf(_)))
+            .unwrap_or(false);
+
+        let right_is_leaf = self
+            .right
+            .as_ref()
+            .map(|node| matches!(node.borrow().node_type, NodeType::Leaf(_)))
+            .unwrap_or(false);
+
+        left_is_leaf || right_is_leaf
+    }
+
+    /// Computes the hash of the node
+    ///
+    /// If it's an inner node, we first check if our left/right are inners or leaves
+    /// If they are inners, we recursively compute their hash
+    /// If they are leaves, we hash the raw values.
     pub fn compute_hash(&self, hasher: &mut H) -> Result<InnerHash, PoseidonMerkleError> {
         match &self.node_type {
             NodeType::Inner(_) => {
-                let left_hash = self
+                let is_last_inner = self.is_last_inner();
+
+                let left_hash_or_zero = self
                     .left
                     .as_ref()
                     .map(|node| node.borrow().compute_hash(hasher))
                     .transpose()?
-                    .unwrap_or(*get_empty_inner_hash());
+                    .unwrap_or(if is_last_inner {
+                        Fr::ZERO
+                    } else {
+                        *get_empty_inner_hash()
+                    });
 
-                let right_hash = self
+                let right_hash_or_zero = self
                     .right
                     .as_ref()
                     .map(|node| node.borrow().compute_hash(hasher))
                     .transpose()?
-                    .unwrap_or(*get_empty_inner_hash());
+                    .unwrap_or(if is_last_inner {
+                        Fr::ZERO
+                    } else {
+                        *get_empty_inner_hash()
+                    });
 
-                Ok(hasher.hash(&[left_hash, right_hash])?)
+                Ok(hasher.hash(&[left_hash_or_zero, right_hash_or_zero])?)
             }
             NodeType::Leaf(value) => {
-                // For leaf nodes, we hash the value with zero
-                Ok(hasher.hash(&[*value, Fr::ZERO])?)
+                // For leaf nodes, we return the value
+                Ok(*value)
             }
         }
     }
