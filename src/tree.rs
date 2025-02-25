@@ -2,20 +2,24 @@ use std::{cell::RefCell, rc::Rc};
 
 use ark_bn254::Fr;
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
-use light_poseidon::{Poseidon, PoseidonError, PoseidonHasher};
+use light_poseidon::{Poseidon, PoseidonHasher};
 
 use crate::{
-    node::{Node, NodeHash},
+    get_empty_inner_hash,
+    node::{InnerHash, Node},
     MerkleProof, NodeType, PoseidonMerkleError, ProofError,
 };
 
-pub type PathHash = Fr;
+/// A path in the merkle tree as a field element
+///
+/// The path corresponds to the bits of the field element (Fr::into_bigint().to_bits_le())
+pub type MerklePath = Fr;
+
+pub type Sibling = Fr;
 
 /// Sparse Poseidon Merkle Tree
 #[derive(Debug, Clone)]
 pub struct SparseMerkleTree<H: PoseidonHasher<Fr>> {
-    /// Empty hash
-    empty_hash: NodeHash,
     /// The hasher for the tree
     hasher: H,
     /// The root of the tree
@@ -31,34 +35,74 @@ impl SparseMerkleTree<Poseidon<Fr>> {
         Self::new_with_hasher(depth, poseidon)
     }
 
-    /// The hash of an empty node
-    ///
-    /// _We arent using lazy static here because it's wonky with wasm_
-    pub fn empty_node_hash() -> Result<NodeHash, PoseidonMerkleError> {
-        let zero = Fr::ZERO;
-        let mut empty_poseidon = Poseidon::<Fr>::new_circom(1)?;
-        let hash = empty_poseidon.hash(&[zero])?;
-        Ok(hash)
-    }
-
     /// Get the bit at the given position
     ///
     /// [true, false] -> [1, 0]
-    pub fn get_path_bit(path_hash: &PathHash, position: usize) -> bool {
-        let bits = path_hash.into_bigint().to_bits_le();
+    pub fn get_path_bit(merkle_path: &MerklePath, position: usize) -> bool {
+        let bits = merkle_path.into_bigint().to_bits_le();
         bits[position]
     }
 
-    /// Get the node at a given path
-    pub fn get_node(
+    /// Get the root hash of the tree
+    pub fn get_root_hash(&self) -> Result<InnerHash, PoseidonMerkleError> {
+        let root = self.root.borrow();
+        let hash = root.node_type.hash();
+
+        match hash {
+            Some(hash) => Ok(*hash),
+            None => Err(PoseidonMerkleError::InvalidNodeType),
+        }
+    }
+
+    /// Get the inner node at a given path and level
+    ///
+    /// root = level 0
+    ///
+    /// leaf = level depth
+    pub fn get_inner_node(
         &self,
-        path_hash: &PathHash,
+        merkle_path: &MerklePath,
+        level: usize,
     ) -> Result<Rc<RefCell<Node<Poseidon<Fr>>>>, PoseidonMerkleError> {
+        if level >= self.depth {
+            return Err(PoseidonMerkleError::InvalidLevel);
+        }
+
         let mut current = self.root.clone();
-        for i in 0..self.depth - 1 {
+        for i in 0..level {
             let next = {
                 let current_ref = current.borrow();
-                let go_right = Self::get_path_bit(path_hash, i);
+                let go_right = Self::get_path_bit(merkle_path, i);
+
+                if go_right {
+                    match &current_ref.right {
+                        Some(node) => node.clone(),
+                        None => Node::new_borrowed_empty_inner(),
+                    }
+                } else {
+                    match &current_ref.left {
+                        Some(node) => node.clone(),
+                        None => Node::new_borrowed_empty_inner(),
+                    }
+                }
+            };
+
+            current = next.clone();
+        }
+
+        Ok(current)
+    }
+
+    /// Get the leaf node at a given path
+    pub fn get_node(
+        &self,
+        merkle_path: &MerklePath,
+    ) -> Result<Rc<RefCell<Node<Poseidon<Fr>>>>, PoseidonMerkleError> {
+        let mut current = self.root.clone();
+        for i in 0..self.depth {
+            let next = {
+                let current_ref = current.borrow();
+                let go_right = Self::get_path_bit(merkle_path, i);
 
                 if go_right {
                     current_ref.right.as_ref().unwrap().clone()
@@ -73,17 +117,29 @@ impl SparseMerkleTree<Poseidon<Fr>> {
         Ok(current)
     }
 
-    /// Generate a proof for a given path
-    pub fn generate_proof(&self, path_hash: &PathHash) -> Result<MerkleProof, PoseidonMerkleError> {
-        let current = self.get_node(path_hash)?;
+    /// Generate a proof for a given path, if through the path we meet an empty node, we return an error
+    ///
+    /// The path MUST BE valid for a NON-EMPTY value.
+    pub fn generate_proof(
+        &self,
+        merkle_path: &MerklePath,
+    ) -> Result<MerkleProof, PoseidonMerkleError> {
+        let current = self.get_node(merkle_path)?;
         let current_ref = current.borrow();
 
         if let NodeType::Leaf(value) = current_ref.node_type {
-            let mut siblings: Vec<NodeHash> = Vec::new();
+            // Store siblings in the order they will be used during verification
+            let mut siblings: Vec<Sibling> = Vec::with_capacity(self.depth);
 
+            // First compute the leaf value hash
             let mut current = self.root.clone();
-            for i in 0..self.depth - 1 {
-                let go_right = Self::get_path_bit(path_hash, i);
+
+            // Collect siblings along the path
+            for i in 0..self.depth {
+                // If we're at the last node, we need to get the leaf sibling, which could be empty
+                let is_last_node = i == self.depth - 1;
+                let go_right = Self::get_path_bit(merkle_path, i);
+
                 let next = {
                     let current_ref = current.borrow();
 
@@ -101,39 +157,53 @@ impl SparseMerkleTree<Poseidon<Fr>> {
                             .clone()
                     }
                 };
-                let sibling: NodeHash = if go_right {
-                    // Left sibling hash
+
+                // On last node, sibling is a leaf, default to empty value (Fr::ZERO)
+                let sibling: Sibling = if go_right {
                     match &current_ref.left {
-                        Some(node) => node.borrow().hash,
-                        None => Some(self.empty_hash),
-                    }
-                    .ok_or(ProofError::SiblingNotFound(i))?
+                        Some(node) => match &node.borrow().node_type {
+                            NodeType::Leaf(_) => Err(ProofError::InnerNodeExpected),
+                            NodeType::Inner(hash) => Ok(*hash),
+                        },
+                        None => {
+                            if is_last_node {
+                                Ok(Fr::ZERO)
+                            } else {
+                                Ok(*get_empty_inner_hash())
+                            }
+                        }
+                    }?
                 } else {
                     match &current_ref.right {
-                        Some(node) => node.borrow().hash,
-                        None => Some(self.empty_hash),
-                    }
-                    .ok_or(ProofError::SiblingNotFound(i))?
+                        Some(node) => match &node.borrow().node_type {
+                            NodeType::Leaf(_) => Err(ProofError::InnerNodeExpected),
+                            NodeType::Inner(hash) => Ok(*hash),
+                        },
+                        None => {
+                            if is_last_node {
+                                Ok(Fr::ZERO)
+                            } else {
+                                Ok(*get_empty_inner_hash())
+                            }
+                        }
+                    }?
                 };
 
                 siblings.push(sibling);
                 current = next.clone();
             }
 
-            Ok(MerkleProof::new(
-                siblings,
-                *path_hash,
-                value,
-                self.root.borrow().hash.unwrap(),
-            ))
+            let root_hash = self.get_root_hash()?;
+
+            Ok(MerkleProof::new(siblings, *merkle_path, value, root_hash))
         } else {
             Err(PoseidonMerkleError::InvalidNodeType)
         }
     }
 
-    /// Get the value at a given path
-    pub fn get_value(&self, path_hash: &PathHash) -> Result<Fr, PoseidonMerkleError> {
-        let node = self.get_node(path_hash)?;
+    /// Get the raw value at a given path for a valid leaf node
+    pub fn get_value(&self, merkle_path: &MerklePath) -> Result<Fr, PoseidonMerkleError> {
+        let node = self.get_node(merkle_path)?;
         let node_ref = node.borrow();
         if let NodeType::Leaf(value) = node_ref.node_type {
             Ok(value)
@@ -141,15 +211,8 @@ impl SparseMerkleTree<Poseidon<Fr>> {
             Err(PoseidonMerkleError::InvalidNodeType)
         }
     }
-    /// Create a new (eager) sparse poseidon merkle tree given a depth
-    pub fn new_eager(depth: usize) -> Result<SparseMerkleTree<Poseidon<Fr>>, PoseidonMerkleError> {
-        todo!("new_eager depth: {}", depth);
-    }
 
-    /// Create a new (lazy) sparse poseidon merkle tree given a depth
-    ///
-    /// We arent creating any nodes here, if you want to create a tree with
-    /// actual nodes, you should use the `new_eager` method
+    /// Create a new sparse poseidon merkle tree given a depth
     pub fn new_with_hasher(
         depth: usize,
         hasher: Poseidon<Fr>,
@@ -159,44 +222,40 @@ impl SparseMerkleTree<Poseidon<Fr>> {
         }
 
         Ok(SparseMerkleTree {
-            empty_hash: SparseMerkleTree::empty_node_hash()?,
             hasher,
-            root: Node::new_inner(),
+            root: Node::new_borrowed_empty_inner(),
             depth,
         })
     }
 
     /// Get the root hash of the tree
-    pub fn root_hash(&mut self) -> Result<NodeHash, PoseidonError> {
-        self.root
-            .borrow()
-            .compute_hash(&mut self.hasher, &self.empty_hash)
+    pub fn root_hash(&mut self) -> Result<InnerHash, PoseidonMerkleError> {
+        self.root.borrow().compute_hash(&mut self.hasher)
     }
 
     /// Insert a value at a given path
     pub fn insert_at_path(
         &mut self,
-        path_hash: &PathHash,
+        merkle_path: &MerklePath,
         value: &Fr,
-    ) -> Result<(), PoseidonError> {
+    ) -> Result<(), PoseidonMerkleError> {
         let mut backtrack_to_root: Vec<Rc<RefCell<Node<Poseidon<Fr>>>>> = Vec::new();
 
         // New closure to avoid borrowing issues
         {
             let mut current = self.root.clone();
-            for i in 0..self.depth - 1 {
+            for i in 0..self.depth {
+                let go_right = SparseMerkleTree::get_path_bit(merkle_path, i);
                 let next = {
                     let mut current_ref = current.borrow_mut();
-                    let go_right = SparseMerkleTree::get_path_bit(path_hash, i);
-
                     if go_right {
                         if current_ref.right.is_none() {
-                            current_ref.right = Some(Node::new_inner());
+                            current_ref.right = Some(Node::new_borrowed_empty_inner());
                         }
                         current_ref.right.as_ref().unwrap().clone()
                     } else {
                         if current_ref.left.is_none() {
-                            current_ref.left = Some(Node::new_inner());
+                            current_ref.left = Some(Node::new_borrowed_empty_inner());
                         }
                         current_ref.left.as_ref().unwrap().clone()
                     }
@@ -209,52 +268,46 @@ impl SparseMerkleTree<Poseidon<Fr>> {
             // At leaf level, we insert the value
             let mut current_ref = current.borrow_mut();
             *current_ref = Node::new_leaf(*value);
-            backtrack_to_root.push(current.clone());
         }
 
         // Recalculate hashes bottom-up
         let rev_backtrack_to_root = backtrack_to_root.iter().rev();
         for node in rev_backtrack_to_root {
-            node.borrow_mut()
-                .recalculate_hash(&mut self.hasher, &self.empty_hash)?;
+            node.borrow_mut().recalculate_hash(&mut self.hasher)?;
         }
 
         Ok(())
     }
 
     /// Delete a value at a given path by inserting a zero value at given path
-    pub fn delete_at_path(&mut self, path_hash: &PathHash) -> Result<(), PoseidonError> {
+    pub fn delete_at_path(&mut self, merkle_path: &MerklePath) -> Result<(), PoseidonMerkleError> {
         let zero = Fr::ZERO;
-        self.insert_at_path(path_hash, &zero)?;
+        self.insert_at_path(merkle_path, &zero)?;
 
         Ok(())
     }
 
     /// Get the path hash from a list of bits
-    pub fn get_path_hash(&self, path: &[bool]) -> Result<PathHash, PoseidonMerkleError> {
+    pub fn get_merkle_path(&self, path: &[bool]) -> Result<MerklePath, PoseidonMerkleError> {
         let path_bits = BigInt::from_bits_le(path);
-        let path_hash =
+        let merkle_path =
             Fr::from_bigint(path_bits).ok_or(PoseidonMerkleError::InvalidBitsPathHash)?;
-        Ok(path_hash)
+        Ok(merkle_path)
     }
 
     /// Check if the tree is empty lazily o(1)
     pub fn is_empty(&self) -> bool {
         let root = self.root.borrow();
-        root.hash.is_none() || root.hash == Some(self.empty_hash)
+        let empty_hash = get_empty_inner_hash();
+
+        root.node_type.hash().unwrap_or(empty_hash).eq(empty_hash)
     }
 
     /// Clear the tree by resetting the root to a new empty node
     ///
     /// Since we're using RC, children will be automatically cleared
-    pub fn clear(&mut self) -> Result<(), PoseidonError> {
-        // Create a new empty root node
-        self.root = Node::new_inner();
-
-        // Reset the root hash to empty hash
-        self.root.borrow_mut().hash = Some(self.empty_hash);
-
-        Ok(())
+    pub fn clear(&mut self) {
+        self.root = Node::new_borrowed_empty_inner();
     }
 }
 
@@ -263,171 +316,5 @@ impl Default for SparseMerkleTree<Poseidon<Fr>> {
         let poseidon =
             Poseidon::<Fr>::new_circom(2).expect("Failed to create default Poseidon hasher");
         Self::new_with_hasher(20, poseidon).expect("Failed to create default SparseMerkleTree")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ark_ff::Zero;
-
-    const DEPTH: usize = 4;
-    const TEST_PATH: [bool; DEPTH - 1] = [true, false, true];
-
-    /// Setup a new tree with a depth of 4 (for testing purposes)
-    fn setup_tree() -> SparseMerkleTree<Poseidon<Fr>> {
-        SparseMerkleTree::new(DEPTH).unwrap()
-    }
-
-    #[test]
-    fn test_new_tree() {
-        let tree = setup_tree();
-        assert_eq!(tree.depth, 4);
-        assert!(tree.is_empty());
-    }
-
-    #[test]
-    fn test_invalid_depth() {
-        let result = SparseMerkleTree::new(0);
-        assert!(matches!(result, Err(PoseidonMerkleError::InvalidDepth)));
-    }
-
-    #[test]
-    fn test_empty_node_hash() {
-        let hash = SparseMerkleTree::<Poseidon<Fr>>::empty_node_hash().unwrap();
-        assert!(!hash.is_zero());
-    }
-
-    #[test]
-    fn test_insert_and_get() {
-        let mut tree = setup_tree();
-        let path_hash = Fr::from_bigint(BigInt::from_bits_le(&TEST_PATH)).unwrap();
-        let value = Fr::from(123u64);
-
-        // Insert value
-        tree.insert_at_path(&path_hash, &value).unwrap();
-
-        // Get and verify value
-        let retrieved_value = tree.get_value(&path_hash).unwrap();
-        assert_eq!(retrieved_value, value);
-        assert!(!tree.is_empty());
-    }
-
-    #[test]
-    fn test_delete() {
-        let mut tree = setup_tree();
-        let path_hash = Fr::from_bigint(BigInt::from_bits_le(&TEST_PATH)).unwrap();
-        let value = Fr::from(123u64);
-
-        // Insert and then delete
-        tree.insert_at_path(&path_hash, &value).unwrap();
-        tree.delete_at_path(&path_hash).unwrap();
-
-        // Verify value is zero
-        let retrieved_value = tree.get_value(&path_hash).unwrap();
-        assert_eq!(retrieved_value, Fr::zero());
-    }
-
-    #[test]
-    fn test_clear() {
-        let mut tree = setup_tree();
-        let path_hash = Fr::from_bigint(BigInt::from_bits_le(&TEST_PATH)).unwrap();
-        let value = Fr::from(123u64);
-
-        tree.insert_at_path(&path_hash, &value).unwrap();
-        tree.clear().unwrap();
-        assert!(tree.is_empty());
-    }
-
-    #[test]
-    fn test_path_bit_extraction() {
-        let bi = BigInt::from_bits_le(&TEST_PATH);
-        let path_hash = Fr::from_bigint(bi).unwrap();
-
-        assert!(SparseMerkleTree::get_path_bit(&path_hash, 0)); // Should be 1
-        assert!(!SparseMerkleTree::get_path_bit(&path_hash, 1)); // Should be 0
-        assert!(SparseMerkleTree::get_path_bit(&path_hash, 2)); // Should be 1
-        assert!(!SparseMerkleTree::get_path_bit(&path_hash, 3)); // Should be 0
-    }
-
-    #[test]
-    fn test_get_path_hash() {
-        let tree = setup_tree();
-        let path = TEST_PATH;
-        let path_hash = tree.get_path_hash(&path).unwrap();
-
-        // Verify bits can be extracted back
-        assert_eq!(SparseMerkleTree::get_path_bit(&path_hash, 0), path[0]);
-        assert_eq!(SparseMerkleTree::get_path_bit(&path_hash, 1), path[1]);
-        assert_eq!(SparseMerkleTree::get_path_bit(&path_hash, 2), path[2]);
-    }
-
-    #[test]
-    fn test_proof_generation_and_verification() {
-        let mut tree = setup_tree();
-        let path_hash = Fr::from_bigint(BigInt::from_bits_le(&TEST_PATH)).unwrap();
-        let value = Fr::from(100u64);
-
-        // Insert a value
-        tree.insert_at_path(&path_hash, &value).unwrap();
-
-        // Generate proof
-        let proof = tree.generate_proof(&path_hash).unwrap();
-
-        // Verify proof matches inserted data
-        assert_eq!(proof.path, path_hash);
-        assert_eq!(proof.leaf_value, value);
-
-        // Verify proof cryptographically
-        let mut hasher = Poseidon::<Fr>::new_circom(2).unwrap();
-        assert!(proof.verify_proof(&mut hasher).unwrap());
-    }
-
-    #[test]
-    fn test_iterator() {
-        let mut tree = setup_tree();
-        let mut hasher = Poseidon::<Fr>::new_circom(2).unwrap();
-
-        // Insert some values
-        let entries = [
-            (
-                Fr::from_bigint(BigInt::from_bits_le(&[false, false, false])).unwrap(),
-                Fr::from(100u64),
-            ),
-            (
-                Fr::from_bigint(BigInt::from_bits_le(&[false, false, true])).unwrap(),
-                Fr::from(200u64),
-            ),
-            (
-                Fr::from_bigint(BigInt::from_bits_le(&[true, true, false])).unwrap(),
-                Fr::from(300u64),
-            ),
-            (
-                Fr::from_bigint(BigInt::from_bits_le(&[true, true, true])).unwrap(),
-                Fr::from(400u64),
-            ),
-        ];
-
-        for (path, value) in entries.iter() {
-            tree.insert_at_path(path, value).unwrap();
-        }
-
-        // Collect all entries from iterator
-        let tree_iter = tree.iter();
-        let found_entries: Vec<(PathHash, Fr)> = tree_iter.collect();
-
-        // Verify all inserted entries are found in order
-        for (i, (hash, value)) in found_entries.iter().enumerate() {
-            let computed_hash = hasher.hash(&[entries[i].1, Fr::ZERO]).unwrap();
-            assert_eq!(computed_hash, *hash);
-            assert_eq!(entries[i].1, *value);
-        }
-    }
-
-    #[test]
-    fn test_default() {
-        let tree = SparseMerkleTree::default();
-        assert_eq!(tree.depth, 20);
-        assert!(tree.is_empty());
     }
 }

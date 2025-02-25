@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use ark_bn254::Fr;
 use light_poseidon::PoseidonHasher;
 
-use crate::{Node, NodeHash, NodeType, SparseMerkleTree};
+use crate::{Node, NodeType, SparseMerkleTree};
 
 // Owned iterator struct
 #[derive(Debug, Clone)]
@@ -22,14 +22,13 @@ pub struct SparseTreeRefIterator<H: PoseidonHasher<Fr>> {
 
 /// DFS Iterator implementation for borrowed tree
 impl<H: PoseidonHasher<Fr>> Iterator for SparseTreeRefIterator<H> {
-    type Item = (NodeHash, Fr);
+    type Item = Fr;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.stack.pop() {
             let node_ref = node.borrow();
             if let NodeType::Leaf(value) = node_ref.node_type {
-                let hash = node_ref.hash?;
-                return Some((hash, value));
+                return Some(value);
             }
 
             if let Some(right) = node_ref.right.as_ref() {
@@ -45,14 +44,13 @@ impl<H: PoseidonHasher<Fr>> Iterator for SparseTreeRefIterator<H> {
 
 /// DFS Iterator implementation for owned tree
 impl<H: PoseidonHasher<Fr>> Iterator for SparseTreeIterator<H> {
-    type Item = (NodeHash, Fr);
+    type Item = Fr;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.stack.pop() {
             let node_ref = node.borrow();
             if let NodeType::Leaf(value) = node_ref.node_type {
-                let hash = node_ref.hash?;
-                return Some((hash, value));
+                return Some(value);
             }
 
             if let Some(right) = node_ref.right.as_ref() {
@@ -68,7 +66,7 @@ impl<H: PoseidonHasher<Fr>> Iterator for SparseTreeIterator<H> {
 
 // owned iteration implementation
 impl<H: PoseidonHasher<Fr>> IntoIterator for SparseMerkleTree<H> {
-    type Item = (NodeHash, Fr);
+    type Item = Fr;
     type IntoIter = SparseTreeIterator<H>;
 
     fn into_iter(self) -> Self::IntoIter {
